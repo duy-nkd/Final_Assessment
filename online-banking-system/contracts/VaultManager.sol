@@ -38,4 +38,22 @@ contract VaultManager is Ownable, Pausable {
     // Cơ chế tạm dừng khẩn cấp 
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
+
+    // Trong VaultManager.sol
+    mapping(address => bool) public isCoreContract;
+
+    function setCoreContract(address _core, bool _status) external onlyOwner {
+        isCoreContract[_core] = _status;
+    }
+
+    // Hàm để SavingCore gọi trả tiền lãi cho user
+    function payInterest(address to, uint256 amount) external {
+        require(isCoreContract[msg.sender], "Only Core Contract");
+        token.transfer(to, amount);
+    }
+    
+    // Thêm hàm lấy feeReceiver để SavingCore chuyển tiền phạt
+    function getFeeReceiver() external view returns (address) {
+        return feeReceiver;
+    }
 }
