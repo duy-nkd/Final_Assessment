@@ -67,6 +67,8 @@ contract SavingCore is ERC721, Ownable {
         uint256 _maxDeposit,
         uint256 _earlyWithdrawPenaltyBps
     ) external onlyOwner {
+        // Thêm dòng này để chặn APR lớn hơn 100% (10000 bps)
+        require(_aprBps <= 10000, "Invalid APR");
         uint256 planId = nextPlanId++;
         
         plans[planId] = SavingPlan({
