@@ -1,0 +1,883 @@
+/* global BigInt */
+import React, { useState, useEffect } from 'react';
+import { ethers } from 'ethers';
+import AdminDashboard from './AdminDashboard';
+
+// ==================== HARDCODED ADDRESSES ====================
+const USDC_ADDRESS = process.env.REACT_APP_USDC_ADDRESS || "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+const CORE_ADDRESS = process.env.REACT_APP_CORE_ADDRESS || "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0";
+const VAULT_ADDRESS = process.env.REACT_APP_VAULT_ADDRESS || "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512";
+const ADMIN_ADDRESS = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+
+// ==================== CONTRACT ABIs ====================
+const USDC_ABI = [
+  "function approve(address spender, uint256 amount) public returns (bool)",
+  "function balanceOf(address account) public view returns (uint256)",
+  "function decimals() public view returns (uint8)",
+  "function transfer(address to, uint256 amount) public returns (bool)",
+  "function mint(address to, uint256 amount) external"
+];
+
+const CORE_ABI = [
+  "function plans(uint256 planId) public view returns (uint256 tenorDays, uint256 aprBps, uint256 minDeposit, uint256 maxDeposit, uint256 earlyWithdrawPenaltyBps, bool enabled)",
+  "function deposits(uint256 depositId) public view returns (uint256 planId, uint256 principal, uint256 startTimestamp, uint256 maturityAt, uint256 aprBpsAtOpen, uint256 penaltyBpsAtOpen, uint8 status)",
+  "function nextDepositId() public view returns (uint256)",
+  "function ownerOf(uint256 tokenId) public view returns (address)",
+  "function openDeposit(uint256 planId, uint256 amount) external",
+  "function withdrawAtMaturity(uint256 depositId) external",
+  "function earlyWithdraw(uint256 depositId) external",
+  "function renewDeposit(uint256 oldDepositId, uint256 newPlanId) external"
+];
+
+// 📊 VaultManager ABI
+const VAULT_ABI = [
+  "function getPenaltyBalance() external view returns (uint256)",
+  "function getFeeReceiver() external view returns (address)"
+];
+
+// ==================== UTILITY FUNCTIONS ====================
+const formatBalance = (balance, decimals = 6) => {
+  return ethers.formatUnits(balance, decimals);
+};
+
+const formatTimestamp = (timestamp) => {
+  const date = new Date(parseInt(timestamp) * 1000);
+  return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+};
+
+const shortenAddress = (address) => {
+  return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : '';
+};
+
+// ==================== MAIN APP COMPONENT ====================
+function App() {
+  // ============= STATE VARIABLES =============
+  const [walletConnected, setWalletConnected] = useState(false);
+  const [userAddress, setUserAddress] = useState('');
+  const [usdcBalance, setUsdcBalance] = useState('0'); // Start with "0", not hardcoded
+  const [provider, setProvider] = useState(null);
+  const [signer, setSigner] = useState(null);
+
+  // Available Plans State
+  const [plans, setPlans] = useState([]);
+  const [loadingPlans, setLoadingPlans] = useState(false);
+
+  // Active Deposits State
+  const [deposits, setDeposits] = useState([]);
+  const [loadingDeposits, setLoadingDeposits] = useState(false);
+
+  // 📊 Penalty Tracking State
+  const [totalPenalty, setTotalPenalty] = useState('0');
+  
+  // Deposit Form State
+  const [depositAmount, setDepositAmount] = useState('');
+  const [selectedPlanId, setSelectedPlanId] = useState(1);
+  const [loadingDeposit, setLoadingDeposit] = useState(false);
+  const [activeTab, setActiveTab] = useState('user');
+
+  // Action Buttons State
+  const [loadingActionId, setLoadingActionId] = useState(null);
+  const isAdmin = userAddress && userAddress.toLowerCase() === ADMIN_ADDRESS.toLowerCase();
+
+  // ============= WALLET CONNECTION =============
+  const connectWallet = async () => {
+    try {
+      if (!window.ethereum) {
+        alert('MetaMask is not installed');
+        return;
+      }
+
+      const accounts = await window.ethereum.request({
+        method: 'eth_requestAccounts'
+      });
+
+      const newProvider = new ethers.BrowserProvider(window.ethereum);
+      const newSigner = await newProvider.getSigner();
+      const address = accounts[0];
+
+      console.log('🔗 Wallet Connected!');
+      console.log('📍 Connected Address:', address);
+      console.log('📍 USDC Contract:', USDC_ADDRESS);
+      console.log('📍 CORE Contract:', CORE_ADDRESS);
+
+      setProvider(newProvider);
+      setSigner(newSigner);
+      setUserAddress(address);
+      setWalletConnected(true);
+
+      // Fetch USDC balance
+      await fetchUSDCBalance(newProvider, address);
+
+      // Fetch plans, deposits, and penalty balance
+      await fetchPlans(newProvider);
+      await fetchUserDeposits(newProvider, address);
+      await fetchPenaltyBalance(newProvider);
+    } catch (error) {
+      console.error('❌ Wallet connection error:', error);
+      console.error('   Error message:', error.message);
+      alert(`Failed to connect wallet: ${error.message}`);
+    }
+  };
+
+  const disconnectWallet = () => {
+    setWalletConnected(false);
+    setUserAddress('');
+    setUsdcBalance('0');
+    setProvider(null);
+    setSigner(null);
+    setPlans([]);
+    setDeposits([]);
+    setActiveTab('user');
+  };
+
+  // ============= FETCH USDC BALANCE =============
+  const fetchUSDCBalance = async (prov, address) => {
+    try {
+      console.log('📊 Fetching USDC balance for:', address);
+      console.log('📍 USDC Contract Address:', USDC_ADDRESS);
+      
+      // Kiểm tra network
+      const network = await prov.getNetwork();
+      console.log('🌐 Connected Network:', network.name, '(ChainID:', network.chainId + ')');
+      
+      // Kiểm tra contract code
+      const code = await prov.getCode(USDC_ADDRESS);
+      console.log('📝 Contract code exists:', code !== '0x');
+      
+      const usdcContract = new ethers.Contract(USDC_ADDRESS, USDC_ABI, prov);
+      const balance = await usdcContract.balanceOf(address, { blockTag: 'latest' });
+      const formattedBalance = formatBalance(balance, 6);
+      
+      console.log('✅ USDC Balance fetched:', formattedBalance, 'for address:', address);
+      setUsdcBalance(formattedBalance);
+    } catch (error) {
+      console.error('❌ Error fetching USDC balance:', error);
+      console.error('   Error message:', error.message);
+      console.error('   Contract Address:', USDC_ADDRESS);
+      console.error('   Full error:', error);
+      
+      // Cố gắng kiểm tra chi tiết
+      try {
+        const network = await prov.getNetwork();
+        const code = await prov.getCode(USDC_ADDRESS);
+        console.log('🔍 Debug Info:');
+        console.log('   Network:', network.name, 'ChainID:', network.chainId);
+        console.log('   Contract exists at address:', code !== '0x');
+      } catch (debugError) {
+        console.error('   Debug error:', debugError.message);
+      }
+      
+      setUsdcBalance('0');
+      alert(`❌ Balance fetch error:\n\nAddress: ${USDC_ADDRESS}\n\nError: ${error.message}\n\nHãy mở Console (F12) để xem debug info`);
+    }
+  };
+
+  // ============= MINT USDC FOR TESTING =============
+  const handleMintUSTC = async () => {
+    if (!signer) {
+      alert('Please connect wallet first');
+      return;
+    }
+
+    try {
+      const amount = prompt('Enter amount to mint (in USDC, e.g., 1000):');
+      if (!amount || parseFloat(amount) <= 0) {
+        alert('Invalid amount');
+        return;
+      }
+
+      const amountInWei = ethers.parseUnits(amount, 6);
+      const usdcContract = new ethers.Contract(USDC_ADDRESS, USDC_ABI, signer);
+
+      console.log('🪙 Minting', amount, 'USDC...');
+      const tx = await usdcContract.mint(userAddress, amountInWei);
+      const receipt = await tx.wait();
+      
+      console.log('✅ Mint successful:', receipt.transactionHash);
+      alert(`Successfully minted ${amount} USDC`);
+
+      // Refresh balance
+      await fetchUSDCBalance(provider, userAddress);
+    } catch (error) {
+      console.error('❌ Error minting USDC:', error);
+      alert(`Mint error: ${error.reason || error.message}`);
+    }
+  };
+
+  // ============= FETCH PLANS =============
+  const fetchPlans = async (prov) => {
+    try {
+      setLoadingPlans(true);
+      const coreContract = new ethers.Contract(CORE_ADDRESS, CORE_ABI, prov);
+
+      // For this example, fetch plan 1. Adjust loop if you have multiple plans.
+      const planData = await coreContract.plans(1, { blockTag: 'latest' });
+      
+      if (planData.enabled) {
+        const plan = {
+          id: 1,
+          tenor: parseInt(planData.tenorDays),
+          apr: parseInt(planData.aprBps) / 100, // Convert bps to %
+          minDeposit: formatBalance(planData.minDeposit, 6),
+          maxDeposit: planData.maxDeposit === 0n ? 'Unlimited' : formatBalance(planData.maxDeposit, 6),
+          penaltyBps: parseInt(planData.earlyWithdrawPenaltyBps)
+        };
+        setPlans([plan]);
+      }
+      setLoadingPlans(false);
+    } catch (error) {
+      console.error('Error fetching plans:', error);
+      setLoadingPlans(false);
+    }
+  };
+
+  // ============= FETCH USER DEPOSITS =============
+  const fetchUserDeposits = async (prov, address) => {
+    try {
+      setLoadingDeposits(true);
+      const coreContract = new ethers.Contract(CORE_ADDRESS, CORE_ABI, prov);
+
+      // Get next deposit ID to know the range
+      const nextDepositId = await coreContract.nextDepositId({ blockTag: 'latest' });
+      const userDeposits = [];
+
+      // Loop through all deposit IDs and check if user owns them
+      for (let i = 1; i < nextDepositId; i++) {
+        try {
+          const owner = await coreContract.ownerOf(i, { blockTag: 'latest' });
+          if (owner.toLowerCase() === address.toLowerCase()) {
+            const depositData = await coreContract.deposits(i, { blockTag: 'latest' });
+            
+            // Status: 0 = Active, 1 = Withdrawn, 2 = ManualRenewed, 3 = AutoRenewed
+            const statusEnum = ['Active', 'Withdrawn', 'ManualRenewed', 'AutoRenewed'];
+            
+            const deposit = {
+              id: i,
+              principal: formatBalance(depositData.principal, 6),
+              status: statusEnum[parseInt(depositData.status)],
+              maturityDate: formatTimestamp(depositData.maturityAt),
+              maturityTimestamp: parseInt(depositData.maturityAt),
+              aprBps: parseInt(depositData.aprBpsAtOpen),
+              penaltyBps: parseInt(depositData.penaltyBpsAtOpen), // Lấy penaltyBps đúng
+              isMatured: Math.floor(Date.now() / 1000) >= parseInt(depositData.maturityAt)
+            };
+            userDeposits.push(deposit);
+          }
+        } catch (error) {
+          // Skip deposits that don't exist or can't be fetched
+          continue;
+        }
+      }
+
+      setDeposits(userDeposits);
+      setLoadingDeposits(false);
+    } catch (error) {
+      console.error('Error fetching user deposits:', error);
+      setLoadingDeposits(false);
+    }
+  };
+
+  // ============= FETCH PENALTY BALANCE =============
+  const fetchPenaltyBalance = async (prov) => {
+    try {
+      const vaultContract = new ethers.Contract(VAULT_ADDRESS, VAULT_ABI, prov);
+      const penaltyBalance = await vaultContract.getPenaltyBalance({ blockTag: 'latest' });
+      const formatted = formatBalance(penaltyBalance, 6);
+      
+      console.log('📊 Total Penalty Collected:', formatted);
+      setTotalPenalty(formatted);
+    } catch (error) {
+      console.error('Error fetching penalty balance:', error);
+    }
+  };
+
+  // ============= OPEN DEPOSIT (2-STEP TRANSACTION) =============
+  const handleOpenDeposit = async () => {
+    if (!signer) {
+      alert('Please connect wallet first');
+      return;
+    }
+
+    if (!depositAmount || parseFloat(depositAmount) <= 0) {
+      alert('Please enter a valid amount');
+      return;
+    }
+
+    try {
+      setLoadingDeposit(true);
+
+      // Parse amount to wei (6 decimals for USDC)
+      const amountInWei = ethers.parseUnits(depositAmount, 6);
+
+      const usdcContract = new ethers.Contract(USDC_ADDRESS, USDC_ABI, signer);
+      const coreContract = new ethers.Contract(CORE_ADDRESS, CORE_ABI, signer);
+
+      // Step 1: Approve USDC spending
+      console.log('Step 1: Approving USDC...');
+      const approveTx = await usdcContract.approve(CORE_ADDRESS, amountInWei);
+      const approveReceipt = await approveTx.wait();
+      console.log('Approve transaction confirmed:', approveReceipt.transactionHash);
+
+      // Step 2: Open deposit
+      console.log('Step 2: Opening deposit...');
+      const depositTx = await coreContract.openDeposit(selectedPlanId, amountInWei);
+      const depositReceipt = await depositTx.wait();
+      console.log('Deposit transaction confirmed:', depositReceipt.transactionHash);
+
+      alert('Deposit opened successfully!');
+      setDepositAmount('');
+
+      // Refresh balance and deposits
+      await fetchUSDCBalance(provider, userAddress);
+      await fetchUserDeposits(provider, userAddress);
+      setLoadingDeposit(false);
+    } catch (error) {
+      console.error('Error opening deposit:', error);
+      alert(`Error: ${error.reason || error.message}`);
+      setLoadingDeposit(false);
+    }
+  };
+
+  // ============= WITHDRAW AT MATURITY =============
+  const handleWithdrawAtMaturity = async (depositId) => {
+    if (!signer) {
+      alert('Please connect wallet first');
+      return;
+    }
+
+    try {
+      setLoadingActionId(depositId);
+      const coreContract = new ethers.Contract(CORE_ADDRESS, CORE_ABI, signer);
+
+      console.log('Withdrawing at maturity for deposit:', depositId);
+      const tx = await coreContract.withdrawAtMaturity(depositId);
+      const receipt = await tx.wait();
+      console.log('Withdraw transaction confirmed:', receipt.transactionHash);
+
+      alert('Withdrawal successful!');
+
+      // Small delay to ensure blockchain state is finalized
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Refresh deposits, balance, and penalty vault
+      await fetchUSDCBalance(provider, userAddress);
+      await fetchUserDeposits(provider, userAddress);
+      await fetchPenaltyBalance(provider);
+      setLoadingActionId(null);
+    } catch (error) {
+      console.error('Error withdrawing at maturity:', error);
+      alert(`Error: ${error.reason || error.message}`);
+      setLoadingActionId(null);
+    }
+  };
+
+  // ============= CALCULATE PENALTY =============
+  const calculatePenalty = (principal, penaltyBps) => {
+    const principalWei = ethers.parseUnits(principal, 6);
+    const penaltyAmountWei = (principalWei * BigInt(penaltyBps)) / 10000n;
+    const amountReceivedWei = principalWei - penaltyAmountWei;
+    const amountReceived = ethers.formatUnits(amountReceivedWei, 6);
+    const penaltyAmount = ethers.formatUnits(penaltyAmountWei, 6);
+    const principalFormatted = ethers.formatUnits(principalWei, 6);
+    return {
+      principal: principalFormatted,
+      penaltyBps: penaltyBps,
+      penaltyPercent: penaltyBps / 100,
+      penaltyAmount: penaltyAmount,
+      amountReceived: amountReceived
+    };
+  };
+
+  // ============= EARLY WITHDRAW =============
+  const handleEarlyWithdraw = async (depositId) => {
+    if (!signer) {
+      alert('Please connect wallet first');
+      return;
+    }
+
+    try {
+      // Tìm deposit để tính penalty
+      const deposit = deposits.find(d => d.id === depositId);
+      if (!deposit) {
+        alert('Deposit not found');
+        return;
+      }
+
+      console.log('🔍 Current USDC Balance before early withdraw:', usdcBalance);
+
+      const coreContract = new ethers.Contract(CORE_ADDRESS, CORE_ABI, signer);
+
+      console.log('🔍 Debug Early Withdraw Info:');
+      console.log('   Deposit ID:', depositId);
+      console.log('   Principal:', deposit.principal);
+      console.log('   PenaltyBps from state:', deposit.penaltyBps);
+      console.log('   APRBps from state:', deposit.aprBps);
+
+      // Read directly from contract
+      const depositData = await provider.call({
+        to: CORE_ADDRESS,
+        data: coreContract.interface.encodeFunctionData('deposits', [depositId])
+      }).catch(() => null);
+      
+      console.log('   Raw contract data:', depositData);
+
+      // Tính penalty chi tiết (dùng penaltyBps đúng)
+      const penalty = calculatePenalty(deposit.principal, deposit.penaltyBps);
+      
+      console.log('💰 Calculated Penalty:', penalty);
+      
+      // Cải tiến confirm dialog với chi tiết penalty
+      const confirmMessage = `⚠️ RÚT SỚM - TÍNH PHÍ PHẠT
+
+📊 Chi Tiết Rút Tiền:
+━━━━━━━━━━━━━━━━━━━━
+💰 Số tiền gốc: $${parseFloat(penalty.principal).toFixed(2)}
+📉 Phí phạt: ${penalty.penaltyPercent.toFixed(2)}% = -$${parseFloat(penalty.penaltyAmount).toFixed(2)}
+━━━━━━━━━━━━━━━━━━━━
+✅ Bạn sẽ nhận: $${parseFloat(penalty.amountReceived).toFixed(2)}
+
+❓ Xác nhận rút sớm?`;
+
+      const confirmWithdraw = window.confirm(confirmMessage);
+      if (!confirmWithdraw) return;
+
+      setLoadingActionId(depositId);
+
+      console.log('Early withdrawing deposit:', depositId);
+      console.log('Penalty details:', penalty);
+      const tx = await coreContract.earlyWithdraw(depositId);
+      const receipt = await tx.wait();
+      console.log('Early withdraw transaction confirmed:', receipt?.transactionHash);
+
+      const txHash = receipt?.transactionHash ? receipt.transactionHash.slice(0, 10) + '...' : 'Pending';
+      alert(`✅ RÚT SỚM THÀNH CÔNG!
+
+📊 Chi tiết giao dịch:
+━━━━━━━━━━━━━━━━━━━━
+💵 Số tiền gốc: $${parseFloat(penalty.principal).toFixed(2)}
+📉 Phí phạt: -$${parseFloat(penalty.penaltyAmount).toFixed(2)}
+━━━━━━━━━━━━━━━━━━━━
+🎯 Nhận được: $${parseFloat(penalty.amountReceived).toFixed(2)}
+━━━━━━━━━━━━━━━━━━━━
+
+📝 TX Hash: ${txHash}`);
+
+      console.log('🔄 Refreshing balance after early withdraw...');
+
+      // Small delay to ensure blockchain state is finalized
+      await new Promise(resolve => setTimeout(resolve, 10000));
+
+      // Refresh balance, deposits and penalty vault
+      await fetchUSDCBalance(provider, userAddress);
+      await fetchUserDeposits(provider, userAddress);
+      await fetchPenaltyBalance(provider);
+      setLoadingActionId(null);
+    } catch (error) {
+      console.error('Error during early withdraw:', error);
+      alert(`❌ Lỗi rút tiền: ${error.reason || error.message}`);
+      setLoadingActionId(null);
+    }
+  };
+
+  // ============= RENEW DEPOSIT =============
+  const handleRenewDeposit = async (depositId) => {
+    if (!signer && provider) {
+      const newSigner = await provider.getSigner();
+      setSigner(newSigner);
+    }
+    if (!signer) {
+      alert('Please connect wallet first');
+      return;
+    }
+
+    try {
+      setLoadingActionId(depositId);
+      const coreContract = new ethers.Contract(CORE_ADDRESS, CORE_ABI, signer);
+
+      console.log('Renewing deposit:', depositId);
+      const tx = await coreContract.renewDeposit(depositId, selectedPlanId);
+      const receipt = await tx.wait();
+      console.log('Renew transaction confirmed:', receipt.transactionHash);
+
+      alert('Deposit renewed successfully!');
+
+      // Small delay to ensure blockchain state is finalized
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Refresh balance, deposits, and penalty vault
+      await fetchUSDCBalance(provider, userAddress);
+      await fetchUserDeposits(provider, userAddress);
+      await fetchPenaltyBalance(provider);
+      setLoadingActionId(null);
+    } catch (error) {
+      console.error('Error renewing deposit:', error);
+      alert(`Error: ${error.reason || error.message}`);
+      setLoadingActionId(null);
+    }
+  };
+
+  // ============= FETCH DATA WHEN WALLET CHANGES =============
+  useEffect(() => {
+    if (walletConnected && provider && userAddress) {
+      fetchUSDCBalance(provider, userAddress);
+      fetchPlans(provider);
+      fetchUserDeposits(provider, userAddress);
+      fetchPenaltyBalance(provider);
+    }
+  }, [userAddress, walletConnected, provider]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ============= AUTO-REFRESH DATA =============
+  useEffect(() => {
+    if (walletConnected && provider) {
+      const interval = setInterval(() => {
+        fetchUserDeposits(provider, userAddress);
+        fetchPenaltyBalance(provider);
+      }, 30000); // Refresh every 30 seconds
+
+      return () => clearInterval(interval);
+    }
+  }, [walletConnected, provider, userAddress]);
+
+  useEffect(() => {
+    if (!isAdmin && activeTab === 'admin') {
+      setActiveTab('user');
+    }
+  }, [isAdmin, activeTab]);
+
+  // ============= RENDER =============
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 md:p-8">
+      <div className="max-w-6xl mx-auto">
+        {/* ===== HEADER ===== */}
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-4xl font-bold text-gray-900">Online Banking System</h1>
+          {walletConnected ? (
+            <div className="text-right">
+              <p className="text-sm text-gray-600">Connected: {shortenAddress(userAddress)}</p>
+              <button
+                onClick={disconnectWallet}
+                className="mt-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"
+              >
+                Disconnect
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={connectWallet}
+              className="px-6 py-3 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition shadow-lg"
+            >
+              Connect MetaMask
+            </button>
+          )}
+        </div>
+
+        {!walletConnected ? (
+          <div className="bg-white rounded-lg p-8 shadow-lg text-center">
+            <p className="text-xl text-gray-600 mb-4">Please connect your MetaMask wallet to get started</p>
+          </div>
+        ) : (
+          <>
+            {isAdmin && (
+              <div className="flex flex-wrap gap-2 mb-6">
+                <button
+                  onClick={() => setActiveTab('user')}
+                  className={`px-4 py-2 rounded-lg font-semibold transition ${
+                    activeTab === 'user'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  User View
+                </button>
+                <button
+                  onClick={() => setActiveTab('admin')}
+                  className={`px-4 py-2 rounded-lg font-semibold transition ${
+                    activeTab === 'admin'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  Admin Panel
+                </button>
+              </div>
+            )}
+
+            {activeTab === 'admin' && isAdmin ? (
+              <>
+                <div className="bg-gradient-to-br from-orange-50 to-red-50 rounded-lg p-6 shadow-lg mb-6 border-2 border-orange-200">
+                  <h2 className="text-2xl font-bold text-orange-900 mb-2">💰 Admin Penalty Vault</h2>
+                  <p className="text-3xl font-bold text-orange-600">${parseFloat(totalPenalty).toFixed(2)} mUSDC</p>
+                  <p className="text-sm text-orange-700 mt-2">Total penalties collected from early withdrawals</p>
+                  <button
+                    onClick={() => fetchPenaltyBalance(provider)}
+                    className="mt-4 px-4 py-2 bg-orange-500 text-white font-semibold rounded-lg hover:bg-orange-600 transition"
+                  >
+                    🔄 Refresh Penalty Balance
+                  </button>
+                </div>
+
+                <AdminDashboard
+                  connectedWallet={userAddress}
+                  provider={provider}
+                  signer={signer}
+                />
+              </>
+            ) : (
+              <>
+                {/* ===== USER BALANCE ===== */}
+                <div className="bg-white rounded-lg p-6 shadow-lg mb-6">
+                  <h2 className="text-2xl font-bold text-gray-900 mb-2">Your Balance</h2>
+                  <p className="text-3xl font-bold text-indigo-600">${parseFloat(usdcBalance).toFixed(2)} mUSDC</p>
+                  <button
+                    onClick={handleMintUSTC}
+                    className="mt-4 px-4 py-2 bg-green-500 text-white font-semibold rounded-lg hover:bg-green-600 transition mr-2"
+                  >
+                    🪙 Mint USDC (Test)
+                  </button>
+                  <button
+                    onClick={() => fetchUSDCBalance(provider, userAddress)}
+                    className="mt-4 px-4 py-2 bg-blue-500 text-white font-semibold rounded-lg hover:bg-blue-600 transition"
+                  >
+                    🔄 Refresh Balance
+                  </button>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-6 mb-6">
+                  {/* ===== VIEW AVAILABLE PLANS ===== */}
+                  <div className="bg-white rounded-lg p-6 shadow-lg">
+                    <h2 className="text-2xl font-bold text-gray-900 mb-4">Available Plans</h2>
+                    {loadingPlans ? (
+                      <p className="text-gray-600">Loading plans...</p>
+                    ) : plans.length === 0 ? (
+                      <p className="text-gray-600">No plans available</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {plans.map((plan) => (
+                          <div key={plan.id} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition">
+                            <div className="flex justify-between items-start mb-2">
+                              <h3 className="font-semibold text-gray-900">Plan #{plan.id}</h3>
+                              <span className="text-lg font-bold text-green-600">{plan.apr}% APR</span>
+                            </div>
+                            <div className="text-sm text-gray-600 space-y-1">
+                              <p>Tenor: {plan.tenor} days</p>
+                              <p>Min Deposit: ${parseFloat(plan.minDeposit).toFixed(2)}</p>
+                              <p>Max Deposit: ${plan.maxDeposit === 'Unlimited' ? 'Unlimited' : parseFloat(plan.maxDeposit).toFixed(2)}</p>
+                              <p>Early Withdrawal Penalty: {(plan.penaltyBps / 100).toFixed(2)}%</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* ===== OPEN A DEPOSIT ===== */}
+                  <div className="bg-white rounded-lg p-6 shadow-lg">
+                    <h2 className="text-2xl font-bold text-gray-900 mb-4">Open a Deposit</h2>
+                    {plans.length > 0 && (
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-2">Plan</label>
+                          <select
+                            value={selectedPlanId}
+                            onChange={(e) => setSelectedPlanId(parseInt(e.target.value))}
+                            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          >
+                            {plans.map((plan) => (
+                              <option key={plan.id} value={plan.id}>
+                                Plan {plan.id} - {plan.apr}% APR, {plan.tenor} days
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-2">Amount (mUSDC)</label>
+                          <input
+                            type="number"
+                            value={depositAmount}
+                            onChange={(e) => setDepositAmount(e.target.value)}
+                            placeholder="Enter amount"
+                            step="0.01"
+                            min="0"
+                            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+
+                        <button
+                          onClick={handleOpenDeposit}
+                          disabled={loadingDeposit || !depositAmount}
+                          className="w-full bg-indigo-600 text-white font-semibold py-3 rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 transition"
+                        >
+                          {loadingDeposit ? 'Processing...' : 'Open Deposit'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ===== ACTIVE DEPOSITS ===== */}
+                <div className="bg-white rounded-lg p-6 shadow-lg">
+                  <div className="flex justify-between items-center mb-4">
+                    <h2 className="text-2xl font-bold text-gray-900">Khoản Tiền Gửi Của Bạn</h2>
+                    <button
+                      onClick={() => fetchUserDeposits(provider, userAddress)}
+                      className="px-3 py-1 text-sm bg-blue-100 text-blue-600 rounded hover:bg-blue-200 transition"
+                    >
+                      🔄 Cập nhật
+                    </button>
+                  </div>
+
+                  {loadingDeposits ? (
+                    <div className="text-center py-8">
+                      <p className="text-gray-600 text-lg">Đang tải danh sách tiền gửi...</p>
+                    </div>
+                  ) : deposits.length === 0 ? (
+                    <div className="bg-gray-50 rounded-lg p-8 text-center">
+                      <p className="text-gray-600 text-lg">📭 Bạn chưa có khoản tiền gửi nào</p>
+                      <p className="text-gray-500 mt-2">Hãy tạo khoản tiền gửi đầu tiên ở phần "Mở Tiền Gửi"</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {deposits.map((deposit) => (
+                        <div
+                          key={deposit.id}
+                          className="border-2 border-gray-200 rounded-lg p-5 hover:border-indigo-400 transition bg-gradient-to-br from-white to-gray-50"
+                        >
+                          {/* Header */}
+                          <div className="flex justify-between items-start mb-3">
+                            <div>
+                              <h3 className="text-lg font-bold text-gray-900">
+                                🏦 Khoản Gửi #{deposit.id}
+                              </h3>
+                              <p className="text-sm text-gray-600 mt-1">
+                                {deposit.status === 'Active' ? '✅ Đang hoạt động' : '❌ ' + deposit.status}
+                              </p>
+                            </div>
+                            <span
+                              className={`px-4 py-2 rounded-full font-semibold text-sm ${
+                                deposit.status === 'Active'
+                                  ? 'bg-green-100 text-green-800'
+                                  : deposit.status === 'Withdrawn'
+                                  ? 'bg-red-100 text-red-800'
+                                  : 'bg-blue-100 text-blue-800'
+                              }`}
+                            >
+                              {deposit.status}
+                            </span>
+                          </div>
+
+                          {/* Details Grid */}
+                          <div className="grid md:grid-cols-4 gap-4 mb-4 py-3 border-y border-gray-200">
+                            <div>
+                              <p className="text-xs text-gray-600 font-semibold">💰 Số Tiền Gốc</p>
+                              <p className="text-xl font-bold text-indigo-600 mt-1">${parseFloat(deposit.principal).toFixed(2)}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-gray-600 font-semibold">📊 Lãi Suất (APR)</p>
+                              <p className="text-xl font-bold text-green-600 mt-1">
+                                {(deposit.aprBps / 100).toFixed(2)}%
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-gray-600 font-semibold">📅 Ngày Đáo Hạn</p>
+                              <p className="text-sm text-gray-900 mt-1">{deposit.maturityDate}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-gray-600 font-semibold">⏰ Tình Trạng</p>
+                              <p className={`text-sm font-semibold mt-1 ${
+                                deposit.isMatured 
+                                  ? 'text-red-600' 
+                                  : 'text-amber-600'
+                              }`}>
+                                {deposit.isMatured ? '🔓 Đã đáo hạn' : '🔒 Chưa đáo hạn'}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Penalty Info for Active Deposits */}
+                          {deposit.status === 'Active' && !deposit.isMatured && (
+                            <div className="bg-orange-50 border-l-4 border-orange-400 p-3 mb-4 rounded">
+                              <p className="text-xs text-orange-600 font-semibold">⚠️ Phí Rút Sớm</p>
+                              <p className="text-sm text-orange-700 mt-1">
+                                Nếu rút sớm sẽ bị trừ <span className="font-bold">{(deposit.penaltyBps / 100).toFixed(2)}%</span> = <span className="font-bold">${(parseFloat(deposit.principal) * deposit.penaltyBps / 10000).toFixed(2)}</span>
+                              </p>
+                              <p className="text-xs text-orange-600 mt-1">
+                                Bạn sẽ nhận: ${(parseFloat(deposit.principal) - parseFloat(deposit.principal) * deposit.penaltyBps / 10000).toFixed(2)}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Action Buttons */}
+                          {deposit.status === 'Active' ? (
+                            <div className="flex flex-wrap gap-3">
+                              {deposit.isMatured ? (
+                                <>
+                                  <button
+                                    onClick={() => handleWithdrawAtMaturity(deposit.id)}
+                                    disabled={loadingActionId === deposit.id}
+                                    className="flex-1 px-4 py-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-400 text-white font-semibold rounded-lg transition"
+                                  >
+                                    {loadingActionId === deposit.id ? (
+                                      <>⏳ Đang xử lý...</>
+                                    ) : (
+                                      <>✅ Rút Đúng Hạn (Nhận Tiền Gốc + Lãi)</>
+                                    )}
+                                  </button>
+                                  <button
+                                    onClick={() => handleRenewDeposit(deposit.id)}
+                                    disabled={loadingActionId === deposit.id}
+                                    className="flex-1 px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 text-white font-semibold rounded-lg transition"
+                                  >
+                                    {loadingActionId === deposit.id ? (
+                                      <>⏳ Đang xử lý...</>
+                                    ) : (
+                                      <>🔄 Gia Hạn (Tái Đầu Tư)</>
+                                    )}
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    onClick={() => handleEarlyWithdraw(deposit.id)}
+                                    disabled={loadingActionId === deposit.id}
+                                    className="flex-1 px-4 py-2 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-400 text-white font-semibold rounded-lg transition"
+                                  >
+                                    {loadingActionId === deposit.id ? (
+                                      <>⏳ Đang xử lý...</>
+                                    ) : (
+                                      <>⚡ Rút Sớm (Mất Phí Phạt)</>
+                                    )}
+                                  </button>
+                                  <button
+                                    disabled
+                                    className="flex-1 px-4 py-2 bg-gray-300 text-gray-600 font-semibold rounded-lg cursor-not-allowed"
+                                  >
+                                    🔒 Gia Hạn (Chưa Đáo Hạn)
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="bg-gray-100 rounded-lg p-3 text-center">
+                              <p className="text-gray-700 font-semibold">
+                                {deposit.status === 'Withdrawn'
+                                  ? '✅ Khoản gửi này đã được rút'
+                                  : '🔄 Khoản gửi này đã được ' + deposit.status}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default App;

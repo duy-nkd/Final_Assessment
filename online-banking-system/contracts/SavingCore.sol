@@ -10,6 +10,7 @@ interface IVaultManager {
     function payInterest(address to, uint256 amount) external;
     function getFeeReceiver() external view returns (address);
     function paused() external view returns (bool);
+    function recordPenalty(uint256 amount) external;
 }
 
 contract SavingCore is ERC721, Ownable {
@@ -175,6 +176,9 @@ contract SavingCore is ERC721, Ownable {
         require(depositToken.transfer(msg.sender, amountToUser), "Transfer to user failed");
         // Chuyển phí phạt cho Admin
         require(depositToken.transfer(feeReceiver, penalty), "Penalty transfer failed");
+        
+        // 📊 Báo cáo penalty cho VaultManager
+        vaultManager.recordPenalty(penalty);
 
         emit Withdrawn(depositId, msg.sender, dep.principal, 0, true);
     }
@@ -247,5 +251,23 @@ contract SavingCore is ERC721, Ownable {
 
         _mint(ownerOf(oldDepositId), newDepositId);
         emit Renewed(oldDepositId, newDepositId, newPrincipal, oldDep.planId);
+    }
+    // Cập nhật lãi suất của gói (chỉ ảnh hưởng đến khoản gửi mới sau này)
+    function updatePlan(uint256 planId, uint256 newAprBps) external onlyOwner {
+        require(planId > 0 && planId < nextPlanId, "Plan does not exist");
+        plans[planId].aprBps = newAprBps;
+        emit PlanUpdated(planId, newAprBps);
+    }
+
+    // Bật gói tiết kiệm
+    function enablePlan(uint256 planId) external onlyOwner {
+        require(planId > 0 && planId < nextPlanId, "Plan does not exist");
+        plans[planId].enabled = true;
+    }
+
+    // Tắt gói tiết kiệm (người dùng không thể gửi thêm vào gói này)
+    function disablePlan(uint256 planId) external onlyOwner {
+        require(planId > 0 && planId < nextPlanId, "Plan does not exist");
+        plans[planId].enabled = false;
     }
 }

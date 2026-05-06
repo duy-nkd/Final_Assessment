@@ -9,8 +9,12 @@ contract VaultManager is Ownable, Pausable {
     IERC20 public immutable token;
     address public feeReceiver;
 
+    // 📊 Tracking tiền phạt rút sớm
+    uint256 public totalPenaltyCollected = 0;
+    
     event VaultFunded(address indexed admin, uint256 amount);
     event VaultWithdrawn(address indexed admin, uint256 amount);
+    event PenaltyCollected(uint256 amount, address indexed from);
 
     constructor(address _token) Ownable(msg.sender) {
         token = IERC20(_token);
@@ -52,8 +56,20 @@ contract VaultManager is Ownable, Pausable {
         token.transfer(to, amount);
     }
     
+    // 📊 Hàm để SavingCore báo cáo tiền phạt nhận được
+    function recordPenalty(uint256 amount) external {
+        require(isCoreContract[msg.sender], "Only Core Contract");
+        totalPenaltyCollected += amount;
+        emit PenaltyCollected(amount, msg.sender);
+    }
+    
     // Thêm hàm lấy feeReceiver để SavingCore chuyển tiền phạt
     function getFeeReceiver() external view returns (address) {
         return feeReceiver;
+    }
+    
+    // 📊 Kiểm tra tổng tiền phạt đã thu
+    function getPenaltyBalance() external view returns (uint256) {
+        return totalPenaltyCollected;
     }
 }
