@@ -77,6 +77,7 @@ function AdminDashboard({ connectedWallet, provider, signer }) {
   });
 
   const [feeReceiverInput, setFeeReceiverInput] = useState('');
+  const [fastForwardDays, setFastForwardDays] = useState('');
 
   const refreshAdminData = async () => {
     if (!provider) return;
@@ -347,6 +348,30 @@ function AdminDashboard({ connectedWallet, provider, signer }) {
     }
   };
 
+  const handleFastForward = async () => {
+    try {
+      const days = Number(fastForwardDays);
+      if (!days || days <= 0) {
+        alert('Enter a valid number of days');
+        return;
+      }
+
+      // Tạo một provider kết nối trực tiếp đến Hardhat RPC thay vì thông qua MetaMask
+      const localProvider = new ethers.JsonRpcProvider('http://127.0.0.1:8545');
+
+      const seconds = days * 24 * 60 * 60;
+      await localProvider.send('evm_increaseTime', [seconds]);
+      await localProvider.send('evm_mine', []);
+
+      alert(`Fast forwarded time by ${days} days`);
+      setFastForwardDays('');
+      await refreshAdminData();
+    } catch (error) {
+      console.error('Fast forward error:', error);
+      alert(`Fast forward error: ${error.reason || error.message}`);
+    }
+  };
+
   return (
     <section className="bg-white rounded-lg p-6 shadow-lg mb-6">
       <div className="flex items-center justify-between mb-4">
@@ -510,6 +535,25 @@ function AdminDashboard({ connectedWallet, provider, signer }) {
           <div className="border border-gray-200 rounded-lg p-5">
             <h3 className="text-lg font-semibold text-gray-900 mb-3">System Controls</h3>
             <div className="space-y-3">
+              <div className="pb-3 mb-3 border-b border-gray-200">
+                <h4 className="text-sm font-semibold text-gray-700 mb-2">Time Travel (Testnet Only)</h4>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    placeholder="Days to forward"
+                    value={fastForwardDays}
+                    onChange={(e) => setFastForwardDays(e.target.value)}
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2"
+                  />
+                  <button
+                    onClick={handleFastForward}
+                    className="bg-purple-600 text-white font-semibold px-4 py-2 rounded-lg hover:bg-purple-700 transition"
+                  >
+                    Forward
+                  </button>
+                </div>
+              </div>
+
               <input
                 type="text"
                 placeholder="Fee receiver address"

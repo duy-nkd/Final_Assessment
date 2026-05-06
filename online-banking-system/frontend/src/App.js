@@ -237,6 +237,10 @@ function App() {
       setLoadingDeposits(true);
       const coreContract = new ethers.Contract(CORE_ADDRESS, CORE_ABI, prov);
 
+      // Get current block timestamp from blockchain (not local machine time)
+      const latestBlock = await prov.getBlock('latest');
+      const currentTimestamp = latestBlock.timestamp;
+
       // Get next deposit ID to know the range
       const nextDepositId = await coreContract.nextDepositId({ blockTag: 'latest' });
       const userDeposits = [];
@@ -259,7 +263,7 @@ function App() {
               maturityTimestamp: parseInt(depositData.maturityAt),
               aprBps: parseInt(depositData.aprBpsAtOpen),
               penaltyBps: parseInt(depositData.penaltyBpsAtOpen), // Lấy penaltyBps đúng
-              isMatured: Math.floor(Date.now() / 1000) >= parseInt(depositData.maturityAt)
+              isMatured: currentTimestamp >= parseInt(depositData.maturityAt)
             };
             userDeposits.push(deposit);
           }
