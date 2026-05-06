@@ -51,6 +51,7 @@ contract SavingCore is ERC721, Ownable {
 
     // Khai báo các Events bắt buộc
     event PlanCreated(uint256 planId, uint256 tenorDays, uint256 aprBps);
+    event PlanUpdated(uint256 planId, uint256 newAprBps);
     event DepositOpened(uint256 depositId, address owner, uint256 planId, uint256 principal, uint256 maturityAt, uint256 aprBpsAtOpen);
     event Withdrawn(uint256 depositId, address owner, uint256 principal, uint256 interest, bool isEarlyWithdraw);
     event Renewed(uint256 oldDepositId, uint256 newDepositId, uint256 newPrincipal, uint256 newPlanId);
