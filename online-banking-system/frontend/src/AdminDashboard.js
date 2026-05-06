@@ -18,7 +18,10 @@ const CORE_ABI = [
   "function createPlan(uint256 tenorDays, uint256 aprBps, uint256 minDeposit, uint256 maxDeposit, uint256 earlyWithdrawPenaltyBps) external",
   "function updatePlan(uint256 planId, uint256 newAprBps) external",
   "function enablePlan(uint256 planId) external",
-  "function disablePlan(uint256 planId) external"
+  "function disablePlan(uint256 planId) external",
+  "function nextDepositId() public view returns (uint256)",
+  "function deposits(uint256 depositId) public view returns (uint256 planId, uint256 principal, uint256 startTimestamp, uint256 maturityAt, uint256 aprBpsAtOpen, uint256 penaltyBpsAtOpen, uint8 status)",
+  "function autoWithdrawDeposit(uint256 depositId) external"
 ];
 
 const VAULT_ABI = [
@@ -46,7 +49,7 @@ const toAmount = (value, decimals = 6) => {
   return ethers.parseUnits(value, decimals);
 };
 
-function AdminDashboard({ connectedWallet, provider, signer }) {
+function AdminDashboard({ connectedWallet, provider, signer, onRefreshNeeded }) {
   const isAdmin = useMemo(() => {
     if (!connectedWallet) return false;
     return connectedWallet.toLowerCase() === ADMIN_ADDRESS.toLowerCase();
@@ -78,6 +81,8 @@ function AdminDashboard({ connectedWallet, provider, signer }) {
 
   const [feeReceiverInput, setFeeReceiverInput] = useState('');
   const [fastForwardDays, setFastForwardDays] = useState('');
+  const [processingAutoWithdraw, setProcessingAutoWithdraw] = useState(false);
+  const [allDeposits, setAllDeposits] = useState([]);
 
   const refreshAdminData = async () => {
     if (!provider) return;
@@ -108,11 +113,33 @@ function AdminDashboard({ connectedWallet, provider, signer }) {
       const feeReceiverAddress = await vaultContract.getFeeReceiver({ blockTag: 'latest' });
       const pausedStatus = await vaultContract.paused({ blockTag: 'latest' });
 
+      // Fetch all deposits for auto-withdrawal check
+      const nextDepositId = await coreContract.nextDepositId({ blockTag: 'latest' });
+      const depositItems = [];
+      const latestBlock = await provider.getBlock('latest');
+      const currentTimestamp = latestBlock.timestamp;
+
+      for (let i = 1; i < Number(nextDepositId); i++) {
+        const dep = await coreContract.deposits(i, { blockTag: 'latest' });
+        depositItems.push({
+          id: i,
+          status: Number(dep.status),
+          maturityAt: Number(dep.maturityAt),
+          canAutoWithdraw: Number(dep.status) === 0 && (currentTimestamp >= Number(dep.maturityAt) + 3 * 24 * 60 * 60)
+        });
+      }
+
       setPlans(planItems);
       setVaultBalance(formatAmount(balance));
       setFeeReceiver(feeReceiverAddress);
       setPaused(pausedStatus);
+      setAllDeposits(depositItems);
       setLoadingPlans(false);
+
+      // Trigger parent refresh if callback provided
+      if (onRefreshNeeded) {
+        onRefreshNeeded();
+      }
     } catch (error) {
       console.error('Admin data refresh failed:', error);
       alert(`Admin refresh error: ${error.reason || error.message}`);
@@ -348,6 +375,42 @@ function AdminDashboard({ connectedWallet, provider, signer }) {
     }
   };
 
+  const handleAutoWithdrawMatured = async () => {
+    if (!signer) {
+      alert('Please connect wallet first');
+      return;
+    }
+
+    const eligible = allDeposits.filter(d => d.canAutoWithdraw);
+    if (eligible.length === 0) {
+      alert('No deposits currently eligible for auto-withdrawal (must be 3+ days past maturity)');
+      return;
+    }
+
+    if (!window.confirm(`Found ${eligible.length} eligible deposits. Process auto-withdrawal for all?`)) {
+      return;
+    }
+
+    try {
+      setProcessingAutoWithdraw(true);
+      const coreContract = new ethers.Contract(CORE_ADDRESS, CORE_ABI, signer);
+
+      for (const dep of eligible) {
+        console.log(`Processing auto-withdrawal for deposit #${dep.id}`);
+        const tx = await coreContract.autoWithdrawDeposit(dep.id);
+        await tx.wait();
+      }
+
+      alert('All eligible deposits processed successfully');
+      await refreshAdminData();
+    } catch (error) {
+      console.error('Auto-withdrawal error:', error);
+      alert(`Auto-withdrawal error: ${error.reason || error.message}`);
+    } finally {
+      setProcessingAutoWithdraw(false);
+    }
+  };
+
   const handleFastForward = async () => {
     try {
       const days = Number(fastForwardDays);
@@ -356,7 +419,7 @@ function AdminDashboard({ connectedWallet, provider, signer }) {
         return;
       }
 
-      // Tạo một provider kết nối trực tiếp đến Hardhat RPC thay vì thông qua MetaMask
+      // Create a provider connecting directly to Hardhat RPC instead of through MetaMask
       const localProvider = new ethers.JsonRpcProvider('http://127.0.0.1:8545');
 
       const seconds = days * 24 * 60 * 60;
@@ -552,6 +615,24 @@ function AdminDashboard({ connectedWallet, provider, signer }) {
                     Forward
                   </button>
                 </div>
+              </div>
+
+              <div className="pb-3 mb-3 border-b border-gray-200">
+                <h4 className="text-sm font-semibold text-gray-700 mb-2">Automated Bot Simulation</h4>
+                <button
+                  onClick={handleAutoWithdrawMatured}
+                  disabled={processingAutoWithdraw}
+                  className={`w-full font-semibold py-2 rounded-lg transition ${
+                    processingAutoWithdraw 
+                      ? 'bg-gray-400 text-white' 
+                      : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-md'
+                  }`}
+                >
+                  {processingAutoWithdraw ? 'Processing...' : 'Process Auto-Withdrawals (3+ Days)'}
+                </button>
+                <p className="text-[10px] text-gray-500 mt-1 italic">
+                  * Scans for Active deposits older than 3 days past maturity and triggers withdrawal to user wallets.
+                </p>
               </div>
 
               <input

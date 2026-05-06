@@ -119,3 +119,4 @@ Default dev server: http://localhost:3000
 - React 18 + react-scripts
 - Tailwind CSS 3.x
 
+[![Demo Video](https://img.youtube.com/vi/S1btLsqmWy4/0.jpg)](https://youtu.be/S1btLsqmWy4?si=rCaZjtcDrvOeA4wM)

@@ -9,7 +9,7 @@ contract VaultManager is Ownable, Pausable {
     IERC20 public immutable token;
     address public feeReceiver;
 
-    // 📊 Tracking tiền phạt rút sớm
+    // 📊 Tracking early withdrawal penalties
     uint256 public totalPenaltyCollected = 0;
     
     event VaultFunded(address indexed admin, uint256 amount);
@@ -18,57 +18,57 @@ contract VaultManager is Ownable, Pausable {
 
     constructor(address _token) Ownable(msg.sender) {
         token = IERC20(_token);
-        feeReceiver = msg.sender; // Mặc định là Admin 
+        feeReceiver = msg.sender; // Default is Admin
     }
 
-    // Admin nạp tiền vào quỹ trả lãi 
+    // Admin funds the interest payment vault
     function fundVault(uint256 amount) external onlyOwner {
         token.transferFrom(msg.sender, address(this), amount);
         emit VaultFunded(msg.sender, amount);
     }
 
-    // Admin rút tiền từ quỹ 
+    // Admin withdraws funds from the vault
     function withdrawVault(uint256 amount) external onlyOwner {
         token.transfer(msg.sender, amount);
         emit VaultWithdrawn(msg.sender, amount);
     }
 
-    // Thiết lập địa chỉ nhận phí phạt rút trước hạn 
+    // Set the address to receive early withdrawal penalty fees
     function setFeeReceiver(address _receiver) external onlyOwner {
         require(_receiver != address(0), "Invalid address");
         feeReceiver = _receiver;
     }
 
-    // Cơ chế tạm dừng khẩn cấp 
+    // Emergency pause mechanism
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
 
-    // Trong VaultManager.sol
+    // In VaultManager.sol
     mapping(address => bool) public isCoreContract;
 
     function setCoreContract(address _core, bool _status) external onlyOwner {
         isCoreContract[_core] = _status;
     }
 
-    // Hàm để SavingCore gọi trả tiền lãi cho user
+    // Function for SavingCore to pay interest to users
     function payInterest(address to, uint256 amount) external {
         require(isCoreContract[msg.sender], "Only Core Contract");
         token.transfer(to, amount);
     }
     
-    // 📊 Hàm để SavingCore báo cáo tiền phạt nhận được
+    // 📊 Function for SavingCore to report collected penalties
     function recordPenalty(uint256 amount) external {
         require(isCoreContract[msg.sender], "Only Core Contract");
         totalPenaltyCollected += amount;
         emit PenaltyCollected(amount, msg.sender);
     }
     
-    // Thêm hàm lấy feeReceiver để SavingCore chuyển tiền phạt
+    // Add function to get feeReceiver for SavingCore to transfer penalties
     function getFeeReceiver() external view returns (address) {
         return feeReceiver;
     }
     
-    // 📊 Kiểm tra tổng tiền phạt đã thu
+    // 📊 Check total penalties collected
     function getPenaltyBalance() external view returns (uint256) {
         return totalPenaltyCollected;
     }
